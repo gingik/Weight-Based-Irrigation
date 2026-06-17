@@ -19,6 +19,9 @@ void PumpManager::writeRelay(bool on) {
 
 void PumpManager::setPump(bool on, const String &reason) {
   if (on == pumpOn) return;
+  // Debounce: enforce minimum 500ms between relay state changes
+  if (millis() - _lastChangeMs < 500) return;
+  _lastChangeMs = millis();
   pumpOn = on;
   writeRelay(on);
   if (on) {

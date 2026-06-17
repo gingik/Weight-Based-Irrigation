@@ -7,7 +7,6 @@ void IrrigationController::begin(ConfigManager *cfg, HX711Manager *h, PumpManage
   hx = h;
   pump = p;
   log = lg;
-  pinMode(MANUAL_BUTTON_PIN, INPUT_PULLUP);
   pinMode(TANK_EMPTY_PIN, INPUT_PULLUP);
   pinMode(LEAK_SENSOR_PIN, INPUT_PULLUP);
   transition(IDLE, "Controller ready");

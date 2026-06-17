@@ -6,6 +6,10 @@ void ConfigManager::begin() {
 
   String name = prefs.getString("name", DEFAULT_DEVICE_NAME);
   name.toCharArray(config.deviceName, sizeof(config.deviceName));
+  String ssid = prefs.getString("ssid", WIFI_SSID);
+  ssid.toCharArray(config.wifiSsid, sizeof(config.wifiSsid));
+  String pwd = prefs.getString("pwd", WIFI_PASSWORD);
+  pwd.toCharArray(config.wifiPassword, sizeof(config.wifiPassword));
   config.triggerMode = (TriggerMode)prefs.getUChar("mode", TRIGGER_ABSOLUTE);
   config.calibrationFactor = prefs.getFloat("cal", 1.0f);
   config.tareOffset = prefs.getLong("tare", 0);
@@ -34,6 +38,8 @@ void ConfigManager::begin() {
 void ConfigManager::applyDefaults() {
   memset(&config, 0, sizeof(config));
   strncpy(config.deviceName, DEFAULT_DEVICE_NAME, sizeof(config.deviceName) - 1);
+  strncpy(config.wifiSsid, WIFI_SSID, sizeof(config.wifiSsid) - 1);
+  strncpy(config.wifiPassword, WIFI_PASSWORD, sizeof(config.wifiPassword) - 1);
   config.triggerMode = TRIGGER_ABSOLUTE;
   config.calibrationFactor = 1.0f;
   config.tareOffset = 0;
@@ -98,6 +104,8 @@ bool ConfigManager::save() {
     return false;
   }
   prefs.putString("name", config.deviceName);
+  prefs.putString("ssid", config.wifiSsid);
+  prefs.putString("pwd", config.wifiPassword);
   prefs.putUChar("mode", (uint8_t)config.triggerMode);
   prefs.putFloat("cal", config.calibrationFactor);
   prefs.putLong("tare", config.tareOffset);

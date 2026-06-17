@@ -7,10 +7,11 @@
 #include "PumpManager.h"
 #include "IrrigationController.h"
 #include "LogManager.h"
+#include "WeightHistoryManager.h"
 
 class WebServerManager {
 public:
-  void begin(ConfigManager *config, HX711Manager *hx, PumpManager *pump, IrrigationController *controller, LogManager *log);
+  void begin(ConfigManager *config, HX711Manager *hx, PumpManager *pump, IrrigationController *controller, LogManager *log, WeightHistoryManager *history);
   void handle();
 private:
   WebServer server{80};
@@ -19,6 +20,8 @@ private:
   PumpManager *pump = nullptr;
   IrrigationController *controller = nullptr;
   LogManager *log = nullptr;
+  WeightHistoryManager *history = nullptr;
+  bool _updateInProgress = false;
 
   void setupRoutes();
   void sendJsonStatus();
@@ -34,6 +37,13 @@ private:
   void handleClearError();
   void handleLogs();
   void handleRoot();
+  void handleWiFiPage();
+  void handleWiFiScan();
+  void handleWiFiConnect();
+  void handleWiFiStatus();
+  void handleFirmwarePage();
+  void handleFirmwareUpload();
+  void handleWeightHistory();
   bool argBool(const String &name, bool fallback);
   uint16_t parseMinutes(const String &hhmm, uint16_t fallback);
 };

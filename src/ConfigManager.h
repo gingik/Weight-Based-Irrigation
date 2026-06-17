@@ -11,6 +11,8 @@ enum TriggerMode : uint8_t {
 
 struct AppConfig {
   char deviceName[40];
+  char wifiSsid[32];
+  char wifiPassword[64];
   TriggerMode triggerMode;
 
   float calibrationFactor;

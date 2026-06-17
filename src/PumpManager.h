@@ -18,5 +18,6 @@ private:
   uint32_t startMs = 0;
   uint32_t stopMs = 0;
   uint32_t lastDuration = 0;
+  uint32_t _lastChangeMs = 0;
   void writeRelay(bool on);
 };

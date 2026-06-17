@@ -5,9 +5,14 @@
 #define FIRMWARE_VERSION "1.0.0"
 #define DEFAULT_DEVICE_NAME "ESP32 Weight Irrigation"
 
+// OTA configuration.
+#define OTA_HOSTNAME "irrigation"
+#define OTA_PASSWORD ""  // Leave empty for no password, or set a shared secret.
+
 // Replace these with your Wi-Fi credentials before uploading.
-#define WIFI_SSID "ARRIS-D83A_EXT"
-#define WIFI_PASSWORD "7C4C85BE7CFD4A5D"
+// Leave empty to configure via the web UI at /wifi after first serial upload.
+#define WIFI_SSID ""
+#define WIFI_PASSWORD ""
 
 // Default GPIO mapping. Change here if your wiring differs.
 #define HX711_DOUT_PIN 32
@@ -44,3 +49,7 @@
 
 // Manual run safety cap.
 #define MAX_MANUAL_RUNTIME_SEC 120
+
+// RTC DS3231 I2C pins (default ESP32: SDA=21, SCL=22)
+#define RTC_SDA_PIN 21
+#define RTC_SCL_PIN 22

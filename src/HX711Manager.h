@@ -30,4 +30,5 @@ private:
   bool filled = false;
   bool firstSample = true;
   uint32_t stableSinceMs = 0;
+  uint32_t _startupMs = 0;
 };

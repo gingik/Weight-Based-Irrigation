@@ -1,47 +1,11 @@
 #include "WebServerManager.h"
 #include "config.h"
+#include "index_html.h"
+#include <Update.h>
 #include <WiFi.h>
 
-static const char INDEX_HTML[] PROGMEM = R"HTML(
-<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ESP32 Weight Irrigation</title>
-<style>
-body{font-family:Arial,sans-serif;background:#111;color:#eee;margin:0;padding:16px}h1{font-size:1.4rem}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.card{background:#1d1d1d;border:1px solid #333;border-radius:12px;padding:14px}.value{font-size:1.8rem;font-weight:bold}.ok{color:#65d46e}.bad{color:#ff6464}.warn{color:#ffd166}label{display:block;margin-top:10px}input,select,button{width:100%;padding:9px;border-radius:8px;border:1px solid #444;background:#222;color:#eee;box-sizing:border-box}button{cursor:pointer;margin-top:8px}.row{display:flex;gap:8px}.row button{flex:1}.danger{background:#6b1c1c}.good{background:#145c2a}.log{font-family:monospace;font-size:.85rem;white-space:pre-wrap}.small{font-size:.8rem;color:#aaa}</style>
-</head><body>
-<h1 id="title">ESP32 Weight Irrigation</h1>
-<div id="alert"></div>
-<div class="grid">
- <div class="card"><div>Current Weight</div><div class="value" id="weight">--</div><div class="small">Raw: <span id="raw">--</span> | Stable: <span id="stable">--</span></div></div>
- <div class="card"><div>System</div><div class="value" id="state">--</div><div>Pump: <b id="pump">--</b></div></div>
- <div class="card"><div>Thresholds</div><div>Trigger: <b id="trigger">--</b> g</div><div>Stop: <b id="stop">--</b> g</div></div>
- <div class="card"><div>Safety</div><div>Tank empty: <b id="tank">--</b></div><div>Leak: <b id="leak">--</b></div><div>Wi-Fi: <b id="wifi">--</b></div></div>
-</div>
-
-<div class="grid" style="margin-top:12px">
- <div class="card"><h2>Manual Control</h2><div class="row"><button class="good" onclick="post('/api/pump/on')">Pump ON</button><button onclick="post('/api/pump/off')">Pump OFF</button></div><label>Run seconds<input id="runSec" type="number" value="10"></label><button onclick="post('/api/pump/run',{seconds:+runSec.value})">Run Timed</button><button class="danger" onclick="post('/api/emergency-stop')">Emergency Stop</button><button onclick="post('/api/clear-error')">Clear Error / E-Stop</button></div>
- <div class="card"><h2>Calibration</h2><button onclick="post('/api/calibration/tare')">Tare / Zero</button><label>Known weight grams<input id="knownWeight" type="number" value="1000"></label><button onclick="post('/api/calibration/known-weight',{knownWeightG:+knownWeight.value})">Calibrate Known Weight</button><button onclick="post('/api/calibration/reset')">Reset Calibration</button></div>
- <div class="card"><h2>Settings</h2><form id="settingsForm" onsubmit="saveSettings(event)">
-  <label>Device name<input name="deviceName"></label><label>Trigger mode<select name="triggerMode"><option value="0">Absolute</option><option value="1">Dry-back %</option></select></label>
-  <label>Trigger weight g<input name="triggerWeightG" type="number" step="0.1"></label><label>Stop weight g<input name="stopWeightG" type="number" step="0.1"></label>
-  <label>Fully wet weight g<input name="fullyWetWeightG" type="number" step="0.1"></label><label>Trigger dry-back %<input name="dryBackTriggerPercent" type="number" step="0.1"></label><label>Stop dry-back %<input name="dryBackStopPercent" type="number" step="0.1"></label>
-  <label>Max runtime sec<input name="maxRuntimeSec" type="number"></label><label>Min gap min<input name="minGapMin" type="number"></label><label>Stable duration sec<input name="stableDurationSec" type="number"></label><label>Filter samples<input name="filterSamples" type="number"></label>
-  <label><input name="relayActiveHigh" type="checkbox"> Relay active HIGH</label><label><input name="tankSensorEnabled" type="checkbox"> Tank sensor enabled</label><label><input name="leakSensorEnabled" type="checkbox"> Leak sensor enabled</label><label><input name="stopOnWifiLoss" type="checkbox"> Stop pump on Wi-Fi loss</label>
-  <button class="good" type="submit">Save Settings</button></form></div>
- <div class="card"><h2>Logs</h2><div class="log" id="logs">Loading...</div></div>
-</div>
-<script>
-async function api(u,o){let r=await fetch(u,o);let t=await r.text();try{return JSON.parse(t)}catch(e){return {ok:r.ok,text:t}}}
-async function post(u,b={}){let r=await api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); alert(JSON.stringify(r)); refresh();}
-function setText(id,v){document.getElementById(id).textContent=v}
-async function refresh(){let s=await api('/api/status'); setText('title',s.deviceName); setText('weight',Number(s.weightGrams).toFixed(1)+' g'); setText('raw',s.rawReading); setText('stable',s.stable?'YES':'NO'); setText('state',s.state); setText('pump',s.pumpOn?'ON':'OFF'); setText('trigger',Number(s.triggerWeight).toFixed(1)); setText('stop',Number(s.stopWeight).toFixed(1)); setText('tank',s.tankEmpty?'YES':'NO'); setText('leak',s.leakDetected?'YES':'NO'); setText('wifi',s.wifiConnected?'OK':'DOWN'); document.getElementById('alert').innerHTML=(s.state.includes('ERROR')||s.state.includes('LEAK')||s.state.includes('TANK')||s.state.includes('EMERGENCY'))?'<div class="card bad"><b>'+s.state+'</b></div>':''; let l=await api('/api/logs'); document.getElementById('logs').textContent=l.logs.map(x=>x.uptimeSec+'s '+x.type+' - '+x.message).join('\n');}
-async function loadSettings(){let c=await api('/api/settings'); let f=document.getElementById('settingsForm'); for(let k in c){ if(f[k]){ if(f[k].type==='checkbox')f[k].checked=!!c[k]; else f[k].value=c[k]; } }}
-async function saveSettings(e){e.preventDefault();let f=e.target;let b={}; for(let el of f.elements){ if(!el.name)continue; b[el.name]=el.type==='checkbox'?el.checked:(el.type==='number'?+el.value:el.value);} let r=await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); alert(JSON.stringify(r)); refresh();}
-loadSettings(); refresh(); setInterval(refresh,2000);
-</script></body></html>
-)HTML";
-
-void WebServerManager::begin(ConfigManager *cfg, HX711Manager *h, PumpManager *p, IrrigationController *ic, LogManager *lg) {
-  config = cfg; hx = h; pump = p; controller = ic; log = lg; setupRoutes(); server.begin(); log->add("WEB", "HTTP server started");
+void WebServerManager::begin(ConfigManager *cfg, HX711Manager *h, PumpManager *p, IrrigationController *ic, LogManager *lg, WeightHistoryManager *wh) {
+  config = cfg; hx = h; pump = p; controller = ic; log = lg; history = wh; setupRoutes(); server.begin(); log->add("WEB", "HTTP server started");
 }
 void WebServerManager::handle(){ server.handleClient(); }
 void WebServerManager::setupRoutes(){
@@ -58,6 +22,46 @@ void WebServerManager::setupRoutes(){
   server.on("/api/emergency-stop", HTTP_POST, [this](){ handleEmergencyStop(); });
   server.on("/api/clear-error", HTTP_POST, [this](){ handleClearError(); });
   server.on("/api/logs", HTTP_GET, [this](){ handleLogs(); });
+  server.on("/api/weight-history", HTTP_GET, [this](){ handleWeightHistory(); });
+  server.on("/wifi", HTTP_GET, [this](){ handleWiFiPage(); });
+  server.on("/api/wifi/scan", HTTP_GET, [this](){ handleWiFiScan(); });
+  server.on("/api/wifi/connect", HTTP_POST, [this](){ handleWiFiConnect(); });
+  server.on("/api/wifi/status", HTTP_GET, [this](){ handleWiFiStatus(); });
+  server.on("/firmware", HTTP_GET, [this](){ handleFirmwarePage(); });
+  server.on("/api/firmware/update", HTTP_POST, [this](){ handleFirmwareUpload(); }, [this](){ 
+    HTTPUpload &upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+      // Reset update-in-progress flag on every new upload
+      this->_updateInProgress = false;
+      pump->setPump(false, "Firmware update");
+      controller->setEmergencyStop(true);
+      Serial.printf("Firmware upload start: %s (%u bytes)\n", upload.filename.c_str(), upload.totalSize);
+      // Update.begin() validates size against flash partition
+      if (!Update.begin(upload.totalSize)) {
+        Update.printError(Serial);
+      } else {
+        this->_updateInProgress = true;
+      }
+    } else if (upload.status == UPLOAD_FILE_WRITE && this->_updateInProgress) {
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        Update.printError(Serial);
+        this->_updateInProgress = false;
+      }
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (this->_updateInProgress && Update.end(true)) {
+        Serial.printf("Firmware upload success: %u bytes\n", upload.totalSize);
+        log->add("OTA", "Web upload OK, rebooting...");
+        server.send(200, "text/plain", "OK - Rebooting");
+        delay(500);
+        ESP.restart();
+      } else {
+        Update.printError(Serial);
+        Update.end(); // clean up partial update
+        log->add("OTA", "Web upload failed");
+        server.send(500, "text/plain", "Update failed");
+      }
+    }
+  });
 }
 void WebServerManager::handleRoot(){ server.send_P(200, "text/html", INDEX_HTML); }
 
@@ -99,5 +103,243 @@ void WebServerManager::handlePumpOff(){ controller->manualOff("Manual off from d
 void WebServerManager::handleEmergencyStop(){ controller->setEmergencyStop(true); server.send(200,"application/json","{\"ok\":true}"); }
 void WebServerManager::handleClearError(){ controller->setEmergencyStop(false); controller->clearError(); server.send(200,"application/json","{\"ok\":true}"); }
 void WebServerManager::handleLogs(){ JsonDocument doc; JsonArray arr=doc["logs"].to<JsonArray>(); log->toJson(arr); String out; serializeJson(doc,out); server.send(200,"application/json",out); }
+void WebServerManager::handleWiFiPage(){
+  String html = R"HTML(<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WiFi Setup</title>
+<style>
+body{font-family:Arial,sans-serif;background:#111;color:#eee;margin:0;padding:16px}
+h1{font-size:1.4rem}
+.card{background:#1d1d1d;border:1px solid #333;border-radius:12px;padding:16px;margin-bottom:12px}
+.list{max-height:300px;overflow-y:auto;border:1px solid #333;border-radius:8px;background:#0a0a0a}
+.network{padding:8px;border-bottom:1px solid #333;cursor:pointer}
+.network:hover{background:#222}
+.network.selected{background:#145c2a}
+input,button{width:100%;padding:9px;border-radius:8px;border:1px solid #444;background:#222;color:#eee;box-sizing:border-box;margin-bottom:8px}
+button{cursor:pointer}
+.good{background:#145c2a}
+.scanning{color:#ffd166}
+</style>
+</head><body>
+<h1>WiFi Network Setup</h1>
+<div class="card">
+  <h2>Available Networks</h2>
+  <button onclick="scanNetworks()">Scan for Networks</button>
+  <div id="networks" class="list"></div>
+  <p id="scanStatus"></p>
+</div>
+<div class="card">
+  <h2>Connect to Network</h2>
+  <label>Selected Network: <input id="selectedSsid" type="text" readonly></label>
+  <label>Password: <input id="password" type="password"></label>
+  <button class="good" onclick="connectNetwork()">Connect</button>
+  <p id="connectStatus"></p>
+</div>
+<div class="card">
+  <h2>Current Connection</h2>
+  <p>SSID: <b id="currentSsid">--</b></p>
+  <p>IP: <b id="currentIp">--</b></p>
+  <button onclick="location.href='/'">Back to Dashboard</button>
+</div>
+<script>
+async function api(u,o){let r=await fetch(u,o);let t=await r.text();try{return JSON.parse(t)}catch(e){return {ok:r.ok,text:t}}}
+async function scanNetworks(){
+  document.getElementById('scanStatus').textContent='Scanning...';
+  document.getElementById('scanStatus').className='scanning';
+  let result=await api('/api/wifi/scan');
+  document.getElementById('scanStatus').textContent='';
+  document.getElementById('scanStatus').className='';
+  let list=document.getElementById('networks');
+  list.innerHTML='';
+  if(result.networks && Array.isArray(result.networks)){
+    result.networks.forEach(net=>{
+      let div=document.createElement('div');
+      div.className='network';
+      div.textContent=(net.ssid||'(Hidden)')+' ('+net.rssi+'dBm)';
+      div.addEventListener('click',function(){selectNetwork(net.ssid,this)});
+      list.appendChild(div);
+    });
+  }
+  if(!list.children.length){list.innerHTML='<div class="network">No networks found</div>';}
+}
+function selectNetwork(ssid,el){
+  document.getElementById('selectedSsid').value=ssid;
+  document.querySelectorAll('.network').forEach(e=>e.classList.remove('selected'));
+  el.classList.add('selected');
+}
+async function connectNetwork(){
+  let ssid=document.getElementById('selectedSsid').value;
+  let pwd=document.getElementById('password').value;
+  if(!ssid){alert('Please select a network');return;}
+  document.getElementById('connectStatus').textContent='Connecting...';
+  document.getElementById('connectStatus').className='scanning';
+  let result=await api('/api/wifi/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:ssid,password:pwd})});
+  if(result.ok){
+    document.getElementById('connectStatus').textContent='Connected! Reloading in 3 seconds...';
+    document.getElementById('connectStatus').className='good';
+    setTimeout(()=>{location.href='/';},3000);
+  }else{
+    document.getElementById('connectStatus').textContent='Failed: '+(result.error||'Unknown error');
+    document.getElementById('connectStatus').className='bad';
+  }
+}
+async function updateStatus(){
+  let status=await api('/api/wifi/status');
+  document.getElementById('currentSsid').textContent=status.ssid||'Not connected';
+  document.getElementById('currentIp').textContent=status.ip||'--';
+}
+scanNetworks();
+updateStatus();
+setInterval(updateStatus,3000);
+</script>
+</body></html>)HTML";
+  server.send(200,"text/html",html);
+}
+void WebServerManager::handleWiFiScan(){
+  int n=WiFi.scanNetworks();
+  JsonDocument doc;
+  JsonArray networks=doc["networks"].to<JsonArray>();
+  for(int i=0;i<n;i++){
+    JsonObject net=networks.add<JsonObject>();
+    net["ssid"]=WiFi.SSID(i);
+    net["rssi"]=WiFi.RSSI(i);
+    net["encryption"]=WiFi.encryptionType(i);
+  }
+  doc["total"]=n;
+  String out;serializeJson(doc,out);
+  server.send(200,"application/json",out);
+}
+void WebServerManager::handleWiFiConnect(){
+  JsonDocument doc;
+  DeserializationError e=deserializeJson(doc,server.arg("plain"));
+  if(e){server.send(400,"application/json","{\"ok\":false,\"error\":\"Bad JSON\"}");return;}
+  String ssid=doc["ssid"]|"";
+  String pwd=doc["password"]|"";
+  if(ssid.length()==0){server.send(400,"application/json","{\"ok\":false,\"error\":\"SSID required\"}");return;}
+  config->get().wifiSsid[0]=0;
+  strlcpy(config->get().wifiSsid,ssid.c_str(),sizeof(config->get().wifiSsid));
+  config->get().wifiPassword[0]=0;
+  strlcpy(config->get().wifiPassword,pwd.c_str(),sizeof(config->get().wifiPassword));
+  config->save();
+  WiFi.disconnect();
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(),pwd.c_str());
+  log->add("WIFI","Connection attempt to: "+ssid);
+  server.send(200,"application/json","{\"ok\":true}");
+}
+void WebServerManager::handleWiFiStatus(){
+  JsonDocument doc;
+  doc["connected"]=(WiFi.status()==WL_CONNECTED);
+  doc["ssid"]=WiFi.SSID();
+  doc["ip"]=WiFi.localIP().toString();
+  String out;serializeJson(doc,out);
+  server.send(200,"application/json",out);
+}
 bool WebServerManager::argBool(const String &name, bool fallback){ if(!server.hasArg(name)) return fallback; String v=server.arg(name); return v=="1"||v=="true"||v=="on"; }
 uint16_t WebServerManager::parseMinutes(const String &hhmm, uint16_t fallback){ int p=hhmm.indexOf(':'); if(p<0)return fallback; int h=hhmm.substring(0,p).toInt(); int m=hhmm.substring(p+1).toInt(); if(h<0||h>23||m<0||m>59)return fallback; return h*60+m; }
+
+void WebServerManager::handleFirmwarePage() {
+  String html = R"HTML(<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Firmware Update</title>
+<style>
+body{font-family:Arial,sans-serif;background:#111;color:#eee;margin:0;padding:16px}
+h1{font-size:1.4rem}
+.card{background:#1d1d1d;border:1px solid #333;border-radius:12px;padding:16px;margin-bottom:12px}
+input,button{width:100%;padding:9px;border-radius:8px;border:1px solid #444;background:#222;color:#eee;box-sizing:border-box;margin-bottom:8px}
+button{cursor:pointer}
+.good{background:#145c2a}
+.danger{background:#6b1c1c}
+#progressBar{width:100%;height:24px;background:#222;border-radius:8px;overflow:hidden;margin-top:8px}
+#progressFill{height:100%;width:0%;background:#145c2a;transition:width .3s}
+#status{text-align:center;margin-top:8px}
+</style>
+</head><body>
+<h1>Firmware Update</h1>
+<div class="card">
+  <h2>Upload Firmware (.bin)</h2>
+  <p>Current version: <b>)HTML" + String(FIRMWARE_VERSION) + R"HTML(</b></p>
+  <input type="file" id="firmwareFile" accept=".bin">
+  <button class="good" onclick="uploadFirmware()">Upload & Update</button>
+  <div id="progressBar"><div id="progressFill"></div></div>
+  <div id="status"></div>
+</div>
+<div class="card">
+  <h2>ArduinoOTA (IDE)</h2>
+  <p>Hostname: <b>irrigation.local</b></p>
+  <p>Available as a network port in Arduino IDE or PlatformIO for wireless firmware upload.</p>
+</div>
+<div class="card">
+  <button onclick="location.href='/'">Back to Dashboard</button>
+</div>
+<script>
+function $(id){return document.getElementById(id)}
+function setStatus(msg,cls){$('status').textContent=msg;$('status').className=cls||''}
+
+function uploadFirmware(){
+  let file=$('firmwareFile').files[0];
+  if(!file){setStatus('Please select a .bin firmware file','bad');return;}
+  if(!file.name.endsWith('.bin')){setStatus('Only .bin files are accepted','bad');return;}
+
+  let xhr=new XMLHttpRequest();
+  xhr.open('POST','/api/firmware/update');
+  xhr.upload.onprogress=function(e){
+    if(e.lengthComputable){
+      let pct=Math.round(e.loaded/e.total*100);
+      $('progressFill').style.width=pct+'%';
+      setStatus('Uploading: '+pct+'%');
+    }
+  };
+  xhr.onload=function(){
+    if(xhr.status===200){
+      $('progressFill').style.width='100%';
+      setStatus('Update successful! Rebooting...','good');
+      setTimeout(()=>{location.href='/'},5000);
+    }else{
+      setStatus('Update failed: '+xhr.responseText,'bad');
+    }
+  };
+  xhr.onerror=function(){
+    setStatus('Network error during upload','bad');
+  };
+  xhr.send(file);
+  setStatus('Starting upload...');
+}
+</script>
+</body></html>)HTML";
+  server.send(200, "text/html", html);
+}
+
+void WebServerManager::handleFirmwareUpload() {
+  // Upload handled entirely by the inline lambda in setupRoutes().
+  // This method exists as a route target; the server.on third argument (upload handler) does the work.
+  server.send(500, "text/plain", "Upload not received");
+}
+
+void WebServerManager::handleWeightHistory() {
+  uint32_t rangeHours = 24;
+  if (server.hasArg("range")) {
+    long r = server.arg("range").toInt();
+    if (r > 0 && r <= 168) rangeHours = (uint32_t)r;
+  }
+
+  uint32_t nowEpoch = history->currentEpoch();
+  uint32_t sinceSec = 0;
+  if (rangeHours < 168) {
+    uint32_t subtractSec = rangeHours * 3600UL;
+    sinceSec = (subtractSec < nowEpoch) ? (nowEpoch - subtractSec) : 0;
+  }
+
+  // Cap at 500 points for JSON size; chart canvas is only ~900px wide anyway
+  const uint16_t MAX_JSON_POINTS = 500;
+  // Each point ~45 bytes JSON, 500 * 45 = 22500, plus wrapper ~100 = 22600.
+  // Use 32KB to be safe.
+  DynamicJsonDocument doc(32768);
+  JsonArray arr = doc["points"].to<JsonArray>();
+  history->toJson(arr, sinceSec, MAX_JSON_POINTS);
+
+  doc["rangeHours"] = rangeHours;
+  doc["totalPoints"] = history->count();
+
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
