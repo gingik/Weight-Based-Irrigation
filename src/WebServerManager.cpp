@@ -3,6 +3,9 @@
 #include "index_html.h"
 #include <Update.h>
 #include <WiFi.h>
+#include <esp_task_wdt.h>
+
+extern void retryWiFi();
 
 void WebServerManager::begin(ConfigManager *cfg, HX711Manager *h, PumpManager *p, IrrigationController *ic, LogManager *lg, WeightHistoryManager *wh) {
   config = cfg; hx = h; pump = p; controller = ic; log = lg; history = wh; setupRoutes(); server.begin(); log->add("WEB", "HTTP server started");
@@ -33,32 +36,39 @@ void WebServerManager::setupRoutes(){
     if (upload.status == UPLOAD_FILE_START) {
       // Reset update-in-progress flag on every new upload
       this->_updateInProgress = false;
+      this->_uploadError = "";
       pump->setPump(false, "Firmware update");
       controller->setEmergencyStop(true);
       Serial.printf("Firmware upload start: %s (%u bytes)\n", upload.filename.c_str(), upload.totalSize);
       // Update.begin() validates size against flash partition
       if (!Update.begin(upload.totalSize)) {
         Update.printError(Serial);
+        this->_uploadError = "Update.begin() failed";
       } else {
         this->_updateInProgress = true;
       }
     } else if (upload.status == UPLOAD_FILE_WRITE && this->_updateInProgress) {
+      // Feed the task watchdog to prevent ESP32 reboot during flash writes.
+      // Update.write() can block long enough to trigger the 5-second TWDT timeout.
+      esp_task_wdt_reset();
       if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
         Update.printError(Serial);
         this->_updateInProgress = false;
+        this->_uploadError = "Write error";
       }
+      yield();
     } else if (upload.status == UPLOAD_FILE_END) {
       if (this->_updateInProgress && Update.end(true)) {
         Serial.printf("Firmware upload success: %u bytes\n", upload.totalSize);
+        // Flush weight history before reboot (normal flush is every 15 min)
+        if (history) history->flushNow();
         log->add("OTA", "Web upload OK, rebooting...");
-        server.send(200, "text/plain", "OK - Rebooting");
-        delay(500);
-        ESP.restart();
+        this->_uploadSuccess = true;
       } else {
         Update.printError(Serial);
         Update.end(); // clean up partial update
         log->add("OTA", "Web upload failed");
-        server.send(500, "text/plain", "Update failed");
+        this->_uploadError = "Update.end() failed";
       }
     }
   });
@@ -67,7 +77,7 @@ void WebServerManager::handleRoot(){ server.send_P(200, "text/html", INDEX_HTML)
 
 void WebServerManager::sendJsonStatus(){
   JsonDocument doc;
-  doc["deviceName"] = config->get().deviceName; doc["firmwareVersion"] = FIRMWARE_VERSION; doc["state"] = controller->stateName(); doc["weightGrams"] = hx->weightG(); doc["rawReading"] = hx->raw(); doc["stable"] = hx->isStable(); doc["sensorValid"] = hx->isValid(); doc["sensorError"] = hx->error(); doc["pumpOn"] = pump->isOn(); doc["triggerWeight"] = controller->triggerWeight(); doc["stopWeight"] = controller->stopWeight(); doc["lastIrrigationDurationSec"] = pump->lastDurationSec(); doc["tankEmpty"] = controller->tankEmpty(); doc["leakDetected"] = controller->leakDetected(); doc["wifiConnected"] = WiFi.status() == WL_CONNECTED; doc["ip"] = WiFi.localIP().toString(); doc["uptimeSec"] = millis()/1000UL;
+  doc["deviceName"] = config->get().deviceName; doc["firmwareVersion"] = FIRMWARE_VERSION; doc["state"] = controller->stateName(); doc["weightGrams"] = hx->weightG(); doc["rawReading"] = hx->raw(); doc["stable"] = hx->isStable(); doc["sensorValid"] = hx->isValid(); doc["sensorError"] = hx->error(); doc["pumpOn"] = pump->isOn(); doc["triggerWeight"] = controller->triggerWeight(); doc["stopWeight"] = controller->stopWeight(); doc["lastIrrigationDurationSec"] = pump->lastDurationSec(); doc["tankEmpty"] = controller->tankEmpty(); doc["leakDetected"] = controller->leakDetected(); doc["wifiConnected"] = WiFi.status() == WL_CONNECTED; doc["ip"] = WiFi.localIP().toString(); doc["uptimeSec"] = millis()/1000UL; doc["rtcValid"] = (history->currentEpoch() >= 1000000000UL); doc["historyPoints"] = history->count();
   String out; serializeJson(doc,out); server.send(200,"application/json",out);
 }
 void WebServerManager::sendJsonSettings(){
@@ -221,8 +231,7 @@ void WebServerManager::handleWiFiConnect(){
   strlcpy(config->get().wifiPassword,pwd.c_str(),sizeof(config->get().wifiPassword));
   config->save();
   WiFi.disconnect();
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid.c_str(),pwd.c_str());
+  retryWiFi();
   log->add("WIFI","Connection attempt to: "+ssid);
   server.send(200,"application/json","{\"ok\":true}");
 }
@@ -309,9 +318,18 @@ function uploadFirmware(){
 }
 
 void WebServerManager::handleFirmwareUpload() {
-  // Upload handled entirely by the inline lambda in setupRoutes().
-  // This method exists as a route target; the server.on third argument (upload handler) does the work.
-  server.send(500, "text/plain", "Upload not received");
+  // Response is sent here (the request handler) rather than from the upload
+  // handler lambda, per ESP32 WebServer conventions. The upload handler just
+  // processes chunks and sets _uploadSuccess / _uploadError flags.
+  if (_uploadSuccess) {
+    _uploadSuccess = false;
+    server.send(200, "text/plain", "OK - Rebooting");
+    delay(500);
+    ESP.restart();
+  } else {
+    String err = _uploadError.length() > 0 ? _uploadError : "Upload not received";
+    server.send(500, "text/plain", err);
+  }
 }
 
 void WebServerManager::handleWeightHistory() {
@@ -322,17 +340,24 @@ void WebServerManager::handleWeightHistory() {
   }
 
   uint32_t nowEpoch = history->currentEpoch();
+  bool rtcValid = (nowEpoch >= 1000000000UL);
   uint32_t sinceSec = 0;
   if (rangeHours < 168) {
     uint32_t subtractSec = rangeHours * 3600UL;
-    sinceSec = (subtractSec < nowEpoch) ? (nowEpoch - subtractSec) : 0;
+    if (rtcValid) {
+      sinceSec = (subtractSec < nowEpoch) ? (nowEpoch - subtractSec) : 0;
+    } else {
+      // RTC not valid — timestamps are seconds-since-boot, use millis()
+      uint32_t bootSec = millis() / 1000UL;
+      sinceSec = (subtractSec < bootSec) ? (bootSec - subtractSec) : 0;
+    }
   }
 
   // Cap at 500 points for JSON size; chart canvas is only ~900px wide anyway
   const uint16_t MAX_JSON_POINTS = 500;
   // Each point ~45 bytes JSON, 500 * 45 = 22500, plus wrapper ~100 = 22600.
   // Use 32KB to be safe.
-  DynamicJsonDocument doc(32768);
+  JsonDocument doc;
   JsonArray arr = doc["points"].to<JsonArray>();
   history->toJson(arr, sinceSec, MAX_JSON_POINTS);
 

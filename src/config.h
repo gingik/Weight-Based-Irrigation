@@ -3,16 +3,21 @@
 #include <Arduino.h>
 
 #define FIRMWARE_VERSION "1.0.0"
-#define DEFAULT_DEVICE_NAME "ESP32 Weight Irrigation"
+#define DEFAULT_DEVICE_NAME "ESP32 Weight Based Irrigation"
 
 // OTA configuration.
-#define OTA_HOSTNAME "irrigation"
+#define OTA_HOSTNAME "wb-irrigation"
 #define OTA_PASSWORD ""  // Leave empty for no password, or set a shared secret.
 
 // Replace these with your Wi-Fi credentials before uploading.
 // Leave empty to configure via the web UI at /wifi after first serial upload.
 #define WIFI_SSID ""
 #define WIFI_PASSWORD ""
+
+// Wi-Fi retry & AP fallback.
+#define WIFI_RETRY_LIMIT 3
+#define AP_SSID "ESP32-Irrigation"
+#define AP_PASSWORD ""
 
 // Default GPIO mapping. Change here if your wiring differs.
 #define HX711_DOUT_PIN 32

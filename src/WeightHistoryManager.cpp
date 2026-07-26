@@ -32,11 +32,16 @@ void WeightHistoryManager::update(float currentWeightG) {
   if (now - _lastSampleMs < HISTORY_INTERVAL_MS) return;
   _lastSampleMs = now;
 
-  // Get epoch from RTC. If RTC lost power (epoch < 1000000000 = Sep 2001), skip.
+  // Get epoch from RTC. Fall back to seconds since boot if RTC time invalid.
   uint32_t epoch = currentEpoch();
-  if (epoch < 1000000000UL) {
-    Serial.println("[History] RTC time invalid, skipping sample");
-    return;
+  bool rtcValid = (epoch >= 1000000000UL);
+  if (!rtcValid) {
+    epoch = now / 1000UL;  // seconds since boot as fallback
+  }
+  static bool loggedRtcWarning = false;
+  if (!loggedRtcWarning && !rtcValid) {
+    loggedRtcWarning = true;
+    Serial.println("[History] RTC time invalid — using boot-relative timestamps until NTP sync");
   }
 
   WeightPoint pt;
@@ -133,12 +138,12 @@ void WeightHistoryManager::loadFromFlash() {
     memcpy(&wg, buf + 4, 4);
     pt.weightG  = *((float*)&wg);
 
-    // Only load points with valid epoch
-    if (pt.epoch >= 1000000000UL) {
-      _points[_head] = pt;
-      _head = (_head + 1) % MAX_HISTORY_POINTS;
-      if (_count < MAX_HISTORY_POINTS) _count++;
-    }
+    // Accept all data points. The chart handler already filters by
+    // time window; storing boot-relative timestamps is necessary when
+    // the RTC hasn't synced yet (epoch < 1e9 is boot-relative).
+    _points[_head] = pt;
+    _head = (_head + 1) % MAX_HISTORY_POINTS;
+    if (_count < MAX_HISTORY_POINTS) _count++;
     loaded++;
   }
   f.close();
@@ -172,4 +177,8 @@ void WeightHistoryManager::flushToFlash() {
   }
   f.close();
   Serial.printf("[History] Flushed %u points to flash\n", _count);
+}
+
+void WeightHistoryManager::flushNow() {
+  flushToFlash();
 }

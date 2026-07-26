@@ -22,6 +22,8 @@ private:
   LogManager *log = nullptr;
   WeightHistoryManager *history = nullptr;
   bool _updateInProgress = false;
+  bool _uploadSuccess = false;
+  String _uploadError = "";
 
   void setupRoutes();
   void sendJsonStatus();

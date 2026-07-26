@@ -23,6 +23,7 @@ public:
   void toJson(JsonArray arr, uint32_t sinceEpoch = 0, uint16_t maxPoints = 0) const;
   uint16_t count() const { return _count; }
   uint32_t currentEpoch() const;
+  void flushNow();
 
 private:
   WeightPoint *_points = nullptr;  // heap-allocated, ~81 KB

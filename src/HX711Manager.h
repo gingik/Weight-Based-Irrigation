@@ -16,6 +16,7 @@ public:
   bool calibrateWithKnownWeight(float knownWeightG, uint8_t times = 20);
   void applyConfig();
 private:
+  void reinit();
   ConfigManager *config = nullptr;
   HX711 scale;
   bool valid = false;
@@ -24,11 +25,13 @@ private:
   uint32_t lastSampleMs = 0;
   long lastRaw = 0;
   float filtered = 0.0f;
-  float samples[50];
-  uint8_t sampleCount = 0;
-  uint8_t sampleIndex = 0;
-  bool filled = false;
+  float _ema = 0.0f;
+  float _emaAlpha = 1.0f;
   bool firstSample = true;
   uint32_t stableSinceMs = 0;
   uint32_t _startupMs = 0;
+  uint8_t _errorCount = 0;
+  uint32_t _lastReinitMs = 0;
+  bool _persistentFault = false;
+  uint32_t _lastErrorLogMs = 0;
 };

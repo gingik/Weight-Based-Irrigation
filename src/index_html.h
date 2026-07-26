@@ -6,7 +6,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Weight Irrigation Controller</title>
+  <title>Weight Based Irrigation Controller</title>
   <style>
     :root {
       --bg: #07120e;
@@ -153,6 +153,25 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       background: var(--green);
       border-color: var(--green);
     }
+
+    .chart-tip {
+      position: absolute;
+      display: none;
+      pointer-events: none;
+      transform: translate(-50%, -100%);
+      background: rgba(6, 18, 13, 0.94);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted);
+      white-space: nowrap;
+      z-index: 5;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+    }
+
+    .chart-tip b { color: var(--green); font-size: 14px; }
 
     .grid {
       display: grid;
@@ -377,7 +396,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <div class="brand">
         <div class="logo">💧</div>
         <div>
-          <h1>Weight Irrigation</h1>
+          <h1>Weight Based Irrigation</h1>
           <div class="sub" id="deviceName">ESP32 HX711 Controller</div>
         </div>
       </div>
@@ -441,6 +460,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             <div class="mini-grid" style="grid-template-columns:1fr 1fr">
               <div class="metric"><span class="muted">Raw</span><b id="rawReading">--</b></div>
               <div class="metric"><span class="muted">Uptime</span><b id="uptime">--</b></div>
+              <div class="metric"><span class="muted">RTC time</span><b id="rtcStatus">--</b></div>
+              <div class="metric"><span class="muted">History pts</span><b id="historyPts">--</b></div>
             </div>
           </div>
         </aside>
@@ -470,7 +491,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <h2>Thresholds and safety limits</h2>
         <div class="form-grid">
           <div class="field"><label>Trigger mode</label><select id="triggerMode"><option value="0">Absolute weight</option><option value="1">Dry-back %</option></select></div>
-          <div class="field"><label>Device name</label><input id="setDeviceName" value="ESP32 Weight Irrigation"></div>
+          <div class="field"><label>Device name</label><input id="setDeviceName" value="ESP32 Weight Based Irrigation"></div>
           <div class="field"><label>Start below weight (g)</label><input id="setTriggerWeight" type="number" value="4300"></div>
           <div class="field"><label>Stop at weight (g)</label><input id="setStopWeight" type="number" value="4800"></div>
           <div class="field"><label>Fully wet weight (g)</label><input id="fullyWetWeight" type="number" value="5000"></div>
@@ -533,7 +554,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           <button class="chart-range" data-range="168">7d</button>
         </div>
         <div style="position:relative;width:100%">
-          <canvas id="weightChart" style="width:100%;height:320px;display:block"></canvas>
+          <canvas id="weightChart" style="width:100%;height:320px;display:block;touch-action:pan-y"></canvas>
+          <div id="chartTip" class="chart-tip"></div>
         </div>
         <div id="chartSummary" class="muted" style="margin-top:8px"></div>
       </div>
@@ -557,7 +579,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         $(tab.dataset.tab).classList.add('active');
         if (tab.dataset.tab === 'logs') loadLogs();
         if (tab.dataset.tab === 'settings') loadSettings();
-        if (tab.dataset.tab === 'chart') loadChart();
+        if (_chartRefreshTimer) { clearInterval(_chartRefreshTimer); _chartRefreshTimer = null; }
+        if (tab.dataset.tab === 'chart') {
+          loadChart();
+          _chartRefreshTimer = setInterval(loadChart, 60000);
+        }
       });
     });
 
@@ -604,8 +630,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         $('state').textContent = s.state || '--';
         $('triggerWeight').textContent = `${s.triggerWeight ?? '--'}g`;
         $('stopWeight').textContent = `${s.stopWeight ?? '--'}g`;
+        _chartThresholds.trigger = Number.isFinite(s.triggerWeight) ? s.triggerWeight : null;
+        _chartThresholds.stop = Number.isFinite(s.stopWeight) ? s.stopWeight : null;
+        if ($('chart').classList.contains('active') && _chartHoverIdx < 0 && _chartPoints.length > 1) {
+          drawChart($('weightChart'), _chartPoints);
+        }
         $('lastIrrigation').textContent = s.lastIrrigationDurationSec ? `${s.lastIrrigationDurationSec}s` : '--';
         $('uptime').textContent = fmtUptime(s.uptimeSec);
+        $('rtcStatus').textContent = s.rtcValid ? 'Valid' : 'Not set';
+        $('rtcStatus').style.color = s.rtcValid ? 'var(--green)' : 'var(--amber)';
+        $('historyPts').textContent = s.historyPoints ?? '0';
         $('pumpState').textContent = s.pumpOn ? 'ON' : 'OFF';
         $('pumpState').className = 'pump-state ' + (s.pumpOn ? 'on' : 'off');
         setBool('sensorValid', s.sensorValid !== false, 'OK', 'ERROR');
@@ -694,9 +728,30 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       }
     }
 
-    function drawChart(canvas, points) {
+    let _chartRangeHours = 6;
+    let _chartPoints = [];
+    let _chartGeom = null;
+    let _chartHoverIdx = -1;
+    let _chartThresholds = { trigger: null, stop: null };
+    let _chartRefreshTimer = null;
+    const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    function fmtClock(epoch, withDate) {
+      const d = new Date(epoch * 1000);
+      const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+      return withDate ? d.getDate() + ' ' + MONTHS_SHORT[d.getMonth()] + ' ' + hm : hm;
+    }
+
+    function drawChart(canvas, pts) {
+      const points = pts || [];
+      _chartPoints = points;
       const dpr = window.devicePixelRatio || 1;
       const rect = canvas.getBoundingClientRect();
+      if (rect.width < 20 || rect.height < 20) {
+        // Canvas not sized yet (parent may have been hidden); retry once on next frame
+        setTimeout(function() { drawChart(canvas, _chartPoints); }, 50);
+        return;
+      }
       canvas.width = rect.width * dpr;
       canvas.height = rect.height * dpr;
       const ctx = canvas.getContext('2d');
@@ -708,22 +763,44 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       const plotH = H - pad.top - pad.bottom;
 
       ctx.clearRect(0, 0, W, H);
+      _chartGeom = null;
 
-      if (!points || points.length < 2) {
+      if (points.length < 2) {
         ctx.fillStyle = '#94b8a7';
         ctx.font = '15px system-ui';
         ctx.textAlign = 'center';
-        ctx.fillText(points && points.length === 1 ? 'Only 1 data point \u2014 need more' : 'No data yet', W / 2, H / 2);
+        if (points.length === 1) {
+          ctx.fillText('Only 1 data point \u2014 need more', W / 2, H / 2);
+        } else {
+          ctx.fillText('No data yet \u2014 readings recorded every minute', W / 2, H / 2 - 10);
+          ctx.font = '12px system-ui';
+          ctx.fillStyle = '#5a8a70';
+          ctx.fillText('(requires valid RTC time & Wi-Fi NTP sync)', W / 2, H / 2 + 15);
+        }
         return;
       }
 
       let yMin = Infinity, yMax = -Infinity;
-      for (const p of points) {
-        if (p.weightG < yMin) yMin = p.weightG;
-        if (p.weightG > yMax) yMax = p.weightG;
+      let idxMin = 0, idxMax = 0;
+      for (let i = 0; i < points.length; i++) {
+        const v = points[i].weightG;
+        if (v < yMin) { yMin = v; idxMin = i; }
+        if (v > yMax) { yMax = v; idxMax = i; }
       }
       const yPad = (yMax - yMin) * 0.12 || 20;
       yMin -= yPad; yMax += yPad;
+
+      // Trigger / stop reference lines; keep them in view when near the data
+      const thr = [];
+      if (Number.isFinite(_chartThresholds.trigger)) thr.push({ v: _chartThresholds.trigger, color: '#ffcb66', label: 'Trigger' });
+      if (Number.isFinite(_chartThresholds.stop)) thr.push({ v: _chartThresholds.stop, color: '#54b7ff', label: 'Stop' });
+      const span0 = yMax - yMin;
+      for (const t of thr) {
+        if (t.v > yMin - span0 * 0.6 && t.v < yMax + span0 * 0.6) {
+          yMin = Math.min(yMin, t.v - span0 * 0.05);
+          yMax = Math.max(yMax, t.v + span0 * 0.05);
+        }
+      }
 
       const t0 = points[0].epoch;
       const t1 = points[points.length - 1].epoch;
@@ -732,6 +809,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
       const x = t => pad.left + (t - t0) / tRange * plotW;
       const y = v => pad.top + plotH - (v - yMin) / (yMax - yMin) * plotH;
+      _chartGeom = { t0, tRange, pad, plotW, x, y };
 
       // Grid lines + Y labels
       ctx.strokeStyle = 'rgba(166,255,205,0.08)';
@@ -746,25 +824,30 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         ctx.fillText(val.toFixed(0), pad.left - 8, yy + 4);
       }
 
-      // X labels
+      // X labels (clock time, with date for multi-day ranges)
       ctx.textAlign = 'center';
-      const xSteps = Math.min(6, points.length);
-      const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const xSteps = Math.min(6, points.length - 1);
       for (let i = 0; i <= xSteps; i++) {
         const idx = Math.round(i / xSteps * (points.length - 1));
-        const pt = points[idx];
-        const d = new Date(pt.epoch * 1000);
-        let label;
-        if (showDates) {
-          label = d.getDate() + ' ' + MONTHS[d.getMonth()] + ' ' +
-            String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
-        } else {
-          const relSec = pt.epoch - t0;
-          const hh = Math.floor(relSec / 3600);
-          const mm = Math.floor((relSec % 3600) / 60);
-          label = hh + 'h' + String(mm).padStart(2, '0') + 'm';
+        ctx.fillText(fmtClock(points[idx].epoch, showDates), x(points[idx].epoch), H - pad.bottom + 17);
+      }
+
+      // Threshold lines (trigger / stop)
+      if (thr.length) {
+        ctx.save();
+        ctx.setLineDash([6, 5]);
+        ctx.font = '10px system-ui';
+        ctx.textAlign = 'left';
+        for (const t of thr) {
+          if (t.v < yMin || t.v > yMax) continue;
+          const yy = y(t.v);
+          ctx.strokeStyle = t.color;
+          ctx.lineWidth = 1.4;
+          ctx.beginPath(); ctx.moveTo(pad.left, yy); ctx.lineTo(W - pad.right, yy); ctx.stroke();
+          ctx.fillStyle = t.color;
+          ctx.fillText(t.label + ' ' + t.v.toFixed(0) + 'g', pad.left + 6, yy - 5);
         }
-        ctx.fillText(label, x(pt.epoch), H - pad.bottom + 17);
+        ctx.restore();
       }
 
       // Fill area
@@ -801,24 +884,104 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           ctx.fill();
         }
       }
+
+      // Min / max markers
+      ctx.font = '10px system-ui';
+      ctx.textAlign = 'center';
+      const extremes = [
+        { i: idxMax, color: '#54b7ff', dy: -10, label: 'max ' },
+        { i: idxMin, color: '#ffcb66', dy: 18, label: 'min ' }
+      ];
+      for (const m of extremes) {
+        const p = points[m.i];
+        ctx.beginPath();
+        ctx.arc(x(p.epoch), y(p.weightG), 4.5, 0, Math.PI * 2);
+        ctx.strokeStyle = m.color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = m.color;
+        ctx.fillText(m.label + p.weightG.toFixed(0) + 'g', x(p.epoch), y(p.weightG) + m.dy);
+      }
+
+      // Hover crosshair
+      if (_chartHoverIdx >= 0 && _chartHoverIdx < points.length) {
+        const p = points[_chartHoverIdx];
+        const px = x(p.epoch), py = y(p.weightG);
+        ctx.strokeStyle = 'rgba(236,255,245,0.35)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(px, pad.top); ctx.lineTo(px, H - pad.bottom); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(pad.left, py); ctx.lineTo(W - pad.right, py); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI * 2); ctx.fillStyle = 'rgba(56,242,143,0.25)'; ctx.fill();
+        ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#38f28f'; ctx.fill();
+      }
     }
 
-    let _chartRangeHours = 6;
+    function chartHoverMove(e) {
+      if (!_chartGeom || _chartPoints.length < 2) return;
+      const g = _chartGeom;
+      const rect = $('weightChart').getBoundingClientRect();
+      const clientX = (e.touches && e.touches.length) ? e.touches[0].clientX : e.clientX;
+      const t = g.t0 + ((clientX - rect.left) - g.pad.left) / g.plotW * g.tRange;
+      let best = 0, bestDist = Infinity;
+      for (let i = 0; i < _chartPoints.length; i++) {
+        const d = Math.abs(_chartPoints[i].epoch - t);
+        if (d < bestDist) { bestDist = d; best = i; }
+      }
+      _chartHoverIdx = best;
+      drawChart($('weightChart'), _chartPoints);
+      const p = _chartPoints[best];
+      const tip = $('chartTip');
+      tip.style.display = 'block';
+      tip.style.left = Math.min(Math.max(g.x(p.epoch), 62), rect.width - 62) + 'px';
+      tip.style.top = Math.max(g.y(p.weightG) - 12, 36) + 'px';
+      tip.innerHTML = '<b>' + p.weightG.toFixed(1) + ' g</b><br>' + fmtClock(p.epoch, true);
+    }
+
+    function chartHoverEnd() {
+      _chartHoverIdx = -1;
+      $('chartTip').style.display = 'none';
+      if (_chartPoints.length > 1) drawChart($('weightChart'), _chartPoints);
+    }
 
     async function loadChart() {
       try {
+        $('chartSummary').textContent = 'Loading...';
         const data = await api('/api/weight-history?range=' + _chartRangeHours);
         const points = data.points || [];
         await new Promise(function(r) { requestAnimationFrame(r); });
         drawChart($('weightChart'), points);
-        $('chartSummary').textContent = points.length
-          ? points.length + ' data points over ' + (_chartRangeHours <= 48 ? _chartRangeHours + 'h' : '7d')
-          : 'No data yet \u2014 readings are recorded every minute';
+        if (points.length) {
+          let mn = Infinity, mx = -Infinity, sum = 0;
+          for (const p of points) {
+            if (p.weightG < mn) mn = p.weightG;
+            if (p.weightG > mx) mx = p.weightG;
+            sum += p.weightG;
+          }
+          const delta = points[points.length - 1].weightG - points[0].weightG;
+          $('chartSummary').textContent =
+            points.length + ' pts over ' + (_chartRangeHours <= 48 ? _chartRangeHours + 'h' : '7d') +
+            ' \u00b7 min ' + mn.toFixed(0) + 'g \u00b7 max ' + mx.toFixed(0) + 'g \u00b7 avg ' + (sum / points.length).toFixed(0) + 'g' +
+            ' \u00b7 \u0394 ' + (delta >= 0 ? '+' : '') + delta.toFixed(0) + 'g';
+        } else {
+          $('chartSummary').textContent = 'No data yet \u2014 readings are recorded every minute';
+        }
       } catch (e) {
         drawChart($('weightChart'), []);
         $('chartSummary').textContent = 'Could not load chart data';
       }
     }
+
+    const _wc = $('weightChart');
+    _wc.addEventListener('mousemove', chartHoverMove);
+    _wc.addEventListener('touchstart', chartHoverMove, { passive: true });
+    _wc.addEventListener('touchmove', chartHoverMove, { passive: true });
+    _wc.addEventListener('mouseleave', chartHoverEnd);
+    _wc.addEventListener('touchend', chartHoverEnd);
+    window.addEventListener('resize', function() {
+      if ($('chart').classList.contains('active') && _chartPoints.length > 1) drawChart($('weightChart'), _chartPoints);
+    });
 
     document.querySelectorAll('.chart-range').forEach(btn => {
       btn.addEventListener('click', function() {

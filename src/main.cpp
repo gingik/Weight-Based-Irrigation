@@ -26,18 +26,54 @@ RTC_DS3231 rtc;
 
 uint32_t lastWifiAttemptMs = 0;
 static bool ntpSynced = false;
+static uint8_t wifiRetryCount = 0;
+static bool apModeActive = false;
 
 void setupOTA();
 
+void startAPMode() {
+  if (apModeActive) return;
+  apModeActive = true;
+  WiFi.mode(WIFI_AP);
+  String pwd = strlen(AP_PASSWORD) > 0 ? AP_PASSWORD : "";
+  WiFi.softAP(AP_SSID, pwd.length() > 0 ? pwd.c_str() : NULL);
+  Serial.printf("AP mode started: SSID=\"%s\" IP=%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+  logManager.add("WIFI", "AP mode: " + String(AP_SSID) + " @ " + WiFi.softAPIP().toString());
+}
+
+void retryWiFi() {
+  wifiRetryCount = 0;
+  apModeActive = false;
+  WiFi.mode(WIFI_STA);
+  const AppConfig &cfg = configManager.get();
+  WiFi.begin(cfg.wifiSsid, cfg.wifiPassword);
+  lastWifiAttemptMs = millis();
+  Serial.println("Retrying WiFi connection with saved credentials");
+}
+
 void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
+  if (apModeActive) return;
+
+  // No SSID configured — go straight to AP mode.
+  const AppConfig &cfg = configManager.get();
+  if (strlen(cfg.wifiSsid) == 0) {
+    startAPMode();
+    return;
+  }
+
+  if (wifiRetryCount >= WIFI_RETRY_LIMIT) {
+    startAPMode();
+    return;
+  }
+
   if (millis() - lastWifiAttemptMs < 15000UL && lastWifiAttemptMs != 0) return;
   lastWifiAttemptMs = millis();
 
-  const AppConfig &cfg = configManager.get();
-  Serial.printf("Connecting to Wi-Fi SSID: %s\n", cfg.wifiSsid);
+  Serial.printf("Connecting to Wi-Fi SSID: %s (attempt %d/%d)\n", cfg.wifiSsid, wifiRetryCount + 1, WIFI_RETRY_LIMIT);
   WiFi.mode(WIFI_STA);
   WiFi.begin(cfg.wifiSsid, cfg.wifiPassword);
+  wifiRetryCount++;
 }
 
 void handleWiFiStatus() {
@@ -47,6 +83,8 @@ void handleWiFiStatus() {
   if (current != previous) {
     previous = current;
     if (current == WL_CONNECTED) {
+      wifiRetryCount = 0;
+      apModeActive = false;
       logManager.add("WIFI", "Connected: " + WiFi.localIP().toString());
       configTime(0, 0, "pool.ntp.org", "time.nist.gov");
       MDNS.begin("irrigation");
@@ -114,7 +152,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(200);
-  Serial.println("\nESP32 Weight Irrigation Controller v" FIRMWARE_VERSION);
+  Serial.println("\nESP32 Weight Based Irrigation Controller v" FIRMWARE_VERSION);
 
   // Init RTC
   Wire.begin(RTC_SDA_PIN, RTC_SCL_PIN);
