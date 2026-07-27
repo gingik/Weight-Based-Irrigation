@@ -13,7 +13,7 @@ This project is designed for indoor growing systems where pot weight is used to 
 
 ## Features
 
-- HX711 load-cell reading
+- HX711 load-cell reading with EMA filtering
 - Weight calibration with tare and known weight
 - Local ESP32 web dashboard
 - Absolute weight trigger mode
@@ -28,8 +28,16 @@ This project is designed for indoor growing systems where pot weight is used to 
 - Emergency stop
 - Settings stored in ESP32 Preferences/NVS
 - Basic event logs
-- REST API for status, settings, calibration, pump control, and logs
+- REST API for status, settings, calibration, pump control, logs, and history
 - Non-blocking `millis()`-based control loop
+- Over-the-air (OTA) firmware updates — web upload and ArduinoOTA
+- Weight history logging — 7 days at 1-minute intervals, persisted to LittleFS
+- DS3231 RTC for accurate timestamps with NTP sync
+- Configurable irrigation time window (e.g. only water between certain hours)
+- WiFi AP mode fallback — auto-starts access point if no network configured
+- mDNS hostname (`irrigation.local`)
+- Status LED indicator
+- Physical manual button input
 
 ---
 
@@ -44,6 +52,7 @@ This project is designed for indoor growing systems where pot weight is used to 
 | Load cell / platform scale | Pot/container weight measurement |
 | Relay module or MOSFET driver | Pump or solenoid switching |
 | Pump or solenoid valve | Irrigation output |
+| DS3231 RTC module | Real-time clock for weight history timestamps |
 | Stable ESP32 power supply | Logic power |
 | Pump power supply | Pump/valve power |
 
@@ -96,6 +105,25 @@ GPIO 15
 
 GPIO 2 is acceptable for the onboard/status LED, but should not be used for pump control.
 
+### Status LED Behavior
+
+The onboard LED on GPIO 2 indicates system status:
+
+| Behavior | Meaning |
+|---|---|
+| Solid on | System running normally (IDLE, IRRIGATING, COOLDOWN) |
+| Slow blink (~1 Hz) | WiFi disconnected, attempting to reconnect |
+| Fast blink (~4 Hz) | Emergency stop or error state |
+| Off | BOOTING or pump actively running |
+
+### Manual Button
+
+A physical push button (default GPIO 27, active-low with internal pull-up) provides:
+
+- **Short press** — Toggle pump ON/OFF manually
+- **Single press while irrigating** — Stop irrigation
+- **Single press while in emergency stop** — Clear error and release emergency stop
+
 ---
 
 ## Software Requirements
@@ -109,55 +137,75 @@ The project uses Arduino framework for ESP32.
 
 ---
 
+## Libraries / Dependencies
+
+All dependencies are resolved automatically by PlatformIO:
+
+| Library | Version | Purpose |
+|---|---|---|
+| `bogde/HX711` | ^0.7.5 | HX711 load-cell amplifier driver |
+| `bblanchon/ArduinoJson` | ^7.0.4 | JSON serialization for REST API |
+| `adafruit/RTClib` | ^2.1.4 | DS3231 real-time clock driver |
+
+## Build Configuration
+
+The project uses a custom partition table (`partitions_custom.csv`) with OTA support:
+
+| Partition | Size | Purpose |
+|---|---|---|
+| `app0` | 1280 KB | Factory / active firmware slot |
+| `app1` | 1280 KB | OTA update slot |
+| `spiffs` | 1472 KB | LittleFS filesystem (weight history, web assets) |
+
 ## Setup
 
+### Option A: Configure WiFi in source (recommended for first flash)
+
 1. Clone the repository:
-
-git clone https://github.com/YOUR_USERNAME/esp32-weight-irrigation.git
-cd esp32-weight-irrigation
-
+   ```
+   git clone https://github.com/YOUR_USERNAME/esp32-weight-irrigation.git
+   cd esp32-weight-irrigation
+   ```
 
 2. Open the folder in VS Code with PlatformIO.
 
-3. Edit Wi-Fi credentials in:
+3. Edit Wi-Fi credentials in `src/config.h`:
+   ```cpp
+   #define WIFI_SSID "YOUR_WIFI_SSID"
+   #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+   ```
 
-src/config.h
-
-Set:
-
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
-
+   Leave them empty (`""`) to use AP mode instead.
 
 4. Connect your ESP32 by USB.
 
-5. Build the firmware:
+5. Build and upload:
+   ```
+   pio run -t upload
+   ```
 
+6. Open the serial monitor to find the IP address:
+   ```
+   pio device monitor
+   ```
 
-pio run
+7. Open the dashboard:
+   ```
+   http://<esp32-ip>/
+   ```
+   Or via mDNS:
+   ```
+   http://irrigation.local/
+   ```
 
+### Option B: Configure WiFi from the browser (AP mode)
 
-6. Upload to the ESP32:
+If you leave `WIFI_SSID` empty in `config.h`, the ESP32 starts in **AP mode** on first boot:
 
-pio run -t upload
-
-
-7. Open the serial monitor:
-
-pio device monitor
-
-
-8. Look for the ESP32 IP address in the serial output.
-
-9. Open the dashboard in your browser:
-
-http://<esp32-ip>/
-
-
-Optional mDNS address, if supported on your network:
-
-
-http://irrigation.local/
+1. Connect your phone or laptop to the WiFi network **`ESP32-Irrigation`**.
+2. Open `http://192.168.4.1/` and navigate to `/wifi`.
+3. Scan for networks, select yours, enter the password, and click Connect.
+4. The ESP32 reboots and connects to your network.
 
 
 ---
@@ -225,6 +273,15 @@ For best results:
 ---
 
 ## Irrigation Modes
+
+### Irrigation Time Window
+
+The firmware supports restricting irrigation to a specific time window (e.g. daytime only). Configured via the REST API or dashboard:
+
+- **`timeWindowEnabled`** — Enable/disable the time restriction.
+- **`windowStartMin`** — Start time as minutes after midnight (e.g. `480` = 08:00).
+- **`windowEndMin`** — End time as minutes after midnight (e.g. `1320` = 22:00).
+- **`allowIrrigationWithoutValidTime`** — If true, allows irrigation when the RTC time is not yet set (e.g. before NTP sync).
 
 ### 1. Absolute Weight Mode
 
@@ -377,9 +434,60 @@ json
 
 ### Logs
 
+```http
 GET /api/logs
+```
 
 Returns recent events such as boot, settings changes, calibration changes, irrigation start/stop, safety stops, and errors.
+
+### Weight History
+
+```http
+GET /api/weight-history?range=<hours>
+```
+
+Returns logged weight data points. The optional `range` query parameter accepts 1–168 hours (default 24).
+
+### WiFi
+
+```http
+GET  /api/wifi/scan
+POST /api/wifi/connect
+GET  /api/wifi/status
+```
+
+`/api/wifi/scan` scans for nearby networks and returns SSID, RSSI, and encryption type.
+
+`/api/wifi/connect` connects to a network:
+
+```json
+{
+  "ssid": "MyNetwork",
+  "password": "secret123"
+}
+```
+
+`/api/wifi/status` returns the current connection state, SSID, and IP address.
+
+### Firmware Update (OTA)
+
+```http
+POST /api/firmware/update
+```
+
+Upload a `.bin` firmware file via `multipart/form-data`. On success the ESP32 saves settings, flushes history, and reboots automatically.
+
+### ArduinoOTA
+
+The ESP32 also exposes an **ArduinoOTA** interface on hostname `wb-irrigation`. Supported in PlatformIO and Arduino IDE for wireless firmware upload without a USB cable.
+
+### Page Routes
+
+| Route | Description |
+|---|---|
+| `/` | Main dashboard |
+| `/wifi` | WiFi network setup page |
+| `/firmware` | Firmware upload page |
 
 ---
 
@@ -387,7 +495,8 @@ Returns recent events such as boot, settings changes, calibration changes, irrig
 
 
 .
-├── platformio.ini
+├── platformio.ini              # PlatformIO build configuration
+├── partitions_custom.csv       # Custom flash partition table (OTA-capable)
 ├── README.md
 └── src
     ├── main.cpp
@@ -403,19 +512,23 @@ Returns recent events such as boot, settings changes, calibration changes, irrig
     ├── WebServerManager.h
     ├── WebServerManager.cpp
     ├── LogManager.h
-    └── LogManager.cpp
+    ├── LogManager.cpp
+    ├── WeightHistoryManager.h
+    └── WeightHistoryManager.cpp
 
 ### Module Overview
 
 | Module | Responsibility |
 |---|---|
-| `main.cpp` | Boot, Wi-Fi, service initialization, main loop |
+| `main.cpp` | Boot, WiFi, OTA, service initialization, main loop |
+| `config.h` | Compile-time configuration (pins, defaults, credentials) |
 | `ConfigManager` | Load/save settings from Preferences/NVS |
-| `HX711Manager` | Read, filter, tare, and calibrate the scale |
+| `HX711Manager` | Read, filter (EMA), tare, and calibrate the scale |
 | `PumpManager` | Safe relay control |
 | `IrrigationController` | State machine and irrigation decisions |
-| `WebServerManager` | Dashboard and REST API |
-| `LogManager` | In-memory event logs |
+| `WebServerManager` | Dashboard, REST API, WiFi setup, firmware upload |
+| `LogManager` | In-memory event logs (last 50 entries) |
+| `WeightHistoryManager` | Ring-buffer weight logging (7 days, persisted to LittleFS) |
 
 ---
 
@@ -445,19 +558,26 @@ Before connecting the real pump:
 
 Included in V1:
 
-- HX711 reading
-- Weight calibration
-- Local dashboard
+- HX711 reading with EMA filtering
+- Weight calibration (tare + known weight)
+- Local web dashboard
 - Absolute threshold mode
 - Dry-back percentage mode
+- Irrigation time window
 - Pump relay control
 - Max runtime safety
 - Minimum gap safety
-- Manual pump control
+- Manual pump control (dashboard + physical button)
 - Emergency stop
-- Settings persistence
-- Basic logs
+- Settings persistence (NVS)
+- Event logs
+- Weight history (7 days, persisted to LittleFS)
+- DS3231 RTC with NTP sync
+- OTA firmware updates (web upload + ArduinoOTA)
+- WiFi AP mode fallback with browser-based setup
+- mDNS (`irrigation.local`)
 - Sensor error handling
+- Status LED indication
 
 Not included in V1:
 
@@ -484,9 +604,7 @@ Possible future improvements:
 - Multi-zone irrigation
 - Multi-load-cell support
 - OLED display
-- OTA firmware updates
-- Wi-Fi captive portal setup
-- Graphing weight over time
+- Weight / history graphing on dashboard
 - Auto dry-back learning
 - Daily irrigation volume limits
 - EC/pH integration
